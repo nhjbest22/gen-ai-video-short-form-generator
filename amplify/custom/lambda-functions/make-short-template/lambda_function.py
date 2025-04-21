@@ -6,14 +6,14 @@ def convert_seconds_to_timecode(seconds):
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     remaining_seconds = int(seconds % 60)
-    frames = int((seconds - int(seconds)) * 25)  # Assuming 25 frames per second, adjust if needed
+    frames = int((seconds - int(seconds)) * 24)  # Assuming 24 frames per second, adjust if needed
 
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(hours, minutes, remaining_seconds, frames)
     
 def convert_timecode_to_seconds(timecode):
     """Convert a timecode string to total seconds."""
     hours, minutes, seconds, frames = map(int, timecode.split(':'))
-    return hours * 3600 + minutes * 60 + seconds + frames / 25.0
+    return hours * 3600 + minutes * 60 + seconds + frames / 24.0
 
 def create_new_video(uuid, index, bucket_name, sections, vertical):
     input_file = f'videos/{uuid}/FHD/{index}-FHD.mp4'

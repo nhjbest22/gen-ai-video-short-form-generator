@@ -213,7 +213,7 @@ def convert_seconds_to_timecode(seconds):
     seconds = float(seconds)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
-    frames = int((seconds - int(seconds)) * 25)  # Assuming 25 fps
+    frames = int((seconds - int(seconds)) * 24)  # Assuming 24 fps
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(int(hours), int(minutes), int(seconds), frames)
 
 def preprocess_highlight_script(highlight_script):
