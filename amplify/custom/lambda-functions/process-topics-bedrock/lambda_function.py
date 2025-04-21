@@ -4,6 +4,7 @@ import boto3
 import botocore
 import os
 import time
+from botocore.exceptions import ClientError
 
 dynamodb = boto3.resource('dynamodb')
 bedrock = boto3.client(
@@ -162,18 +163,39 @@ IMPORTANT:
         "temperature": 0,
         "top_p": 0
     })
-    
-    response = bedrock.invoke_model(body=body, accept='*/*', contentType='application/json', modelId=modelID)
 
-    response_body = json.loads(response['body'].read())
-    
-    response_text = response_body['content'][0]['text']
-    
-    print(response_text)
+    # 지수 백오프 재시도 로직 추가
+    max_retries = 10  # 최대 재시도 횟수
+    max_backoff = 16  # 최대 대기 시간
+    retry_count = 0
 
-    firstIndex = int(response_text.find('{'))
-    endIndex = int(response_text.rfind('}'))
-    
-    chunk = json.loads(response_text[firstIndex:endIndex+1])
-    
-    return chunk['text']
+
+    while True:
+        try:
+            response = bedrock.invoke_model(body=body, accept='*/*', contentType='application/json', modelId=modelID)
+            response_body = json.loads(response['body'].read())
+            response_text = response_body['content'][0]['text']
+            
+            print(response_text)
+            
+            firstIndex = int(response_text.find('{'))
+            endIndex = int(response_text.rfind('}'))
+            
+            chunk = json.loads(response_text[firstIndex:endIndex+1])
+            
+            return chunk['text']
+            
+        except ClientError as e:
+            # ThrottlingException 처리
+            if e.response['Error']['Code'] == 'ThrottlingException' and retry_count < max_retries:
+                retry_count += 1
+                # 지수 백오프 계산 (1초, 2초, 4초, 8초, ...)
+                backoff_time = min(2 ** (retry_count - 1), max_backoff)
+
+                sleep_time = backoff_time                
+                print(f"ThrottlingException 발생. {sleep_time:.2f}초 후 재시도 ({retry_count}/{max_retries})...")
+                time.sleep(sleep_time)
+            else:
+                # 최대 재시도 횟수 초과 또는 다른 오류인 경우
+                print(f"오류 발생: {str(e)}")
+                raise
