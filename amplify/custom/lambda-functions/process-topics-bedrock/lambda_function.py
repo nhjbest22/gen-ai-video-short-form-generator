@@ -12,18 +12,25 @@ bedrock = boto3.client(
     region_name='us-west-2',
     config=botocore.config.Config(connect_timeout=1000, read_timeout=1000)
 )
+s3 = boto3.client('s3')
 
 def lambda_handler(event, context):
-
     topic = event['topic']
     topics = event['topics']
     uuid = event['uuid']
     modelID = event['modelID']
     owner = event['owner']
     index = event['index']
-    script = event['script']  # You'll need to pass the script from the first Lambda
+    script = event['script']  # 첫 번째 Lambda에서 전달된 스크립트
 
-    extracted_highlight = process_topic(topic, topics, script, uuid, modelID, owner, index)
+    # S3에서 타임스탬프가 포함된 트랜스크립트 가져오기
+    bucket_name = os.environ.get("BUCKET_NAME")
+    transcript_json = get_transcript_from_s3(bucket_name, uuid)
+    
+    # 타임스탬프가 포함된 스크립트 생성
+    timestamped_script = create_timestamped_script(transcript_json)
+    
+    extracted_highlight = process_topic(topic, topics, timestamped_script, uuid, modelID, owner, index)
 
     return { 
         'statusCode': 200,
@@ -31,43 +38,157 @@ def lambda_handler(event, context):
         'body': json.dumps('Finished Highlight Extraction!')
     }
 
-def process_topic(topic, topics, script, uuid, modelID, owner, index):
+def get_transcript_from_s3(bucket_name, uuid):
+    """S3에서 트랜스크립트 JSON 가져오기"""
+    try:
+        json_object = s3.get_object(Bucket=bucket_name, Key=f'videos/{uuid}/Transcript.json')
+        json_content = json.load(json_object['Body'])
+        return json_content
+    except Exception as e:
+        print(f"S3에서 트랜스크립트를 가져오는 중 오류 발생: {str(e)}")
+        raise
+
+def create_timestamped_script(transcript_json):
+    """타임스탬프가 포함된 스크립트 생성"""
+    items = transcript_json['results']['items']
+    timestamped_script = []
+    
+    current_sentence = []
+    sentence_start_time = None
+    
+    for item in items:
+        if item['type'] == 'pronunciation':
+            word = item['alternatives'][0]['content']
+            start_time = float(item['start_time'])
+            end_time = float(item['end_time'])
+            
+            if sentence_start_time is None:
+                sentence_start_time = start_time
+            
+            current_sentence.append(word)
+            
+            # 문장 끝 감지 (마침표, 물음표, 느낌표 등으로 끝나는 경우)
+            if word.endswith('.') or word.endswith('?') or word.endswith('!'):
+                sentence_text = ' '.join(current_sentence)
+                timestamped_script.append({
+                    'text': sentence_text,
+                    'start_time': sentence_start_time,
+                    'end_time': end_time
+                })
+                current_sentence = []
+                sentence_start_time = None
+        
+        # 구두점 처리
+        elif item['type'] == 'punctuation':
+            if current_sentence:
+                current_sentence[-1] += item['alternatives'][0]['content']
+    
+    # 남은 문장 처리
+    if current_sentence and sentence_start_time is not None:
+        sentence_text = ' '.join(current_sentence)
+        timestamped_script.append({
+            'text': sentence_text,
+            'start_time': sentence_start_time,
+            'end_time': items[-1]['end_time'] if 'end_time' in items[-1] else None
+        })
+    
+    return timestamped_script
+
+def process_topic(topic, topics, timestamped_script, uuid, modelID, owner, index):
     shorts = dynamodb.Table(os.environ["HIGHLIGHT_TABLE_NAME"])
     
-    section_text = extract_and_process_section(topic, topics, script, modelID)
+    # 타임스탬프가 포함된 스크립트로 섹션 추출 및 처리
+    section_data = extract_and_process_section(topic, topics, timestamped_script, modelID)
     
     timestamp = datetime.datetime.now(datetime.UTC).isoformat()[:-6]+"Z"
     
     highlight = {
-        "Text": section_text,
+        "Text": section_data['text'],
         "Question": topic,
         "Index": str(index),
         "VideoName": uuid,
         "createdAt": timestamp,
         "updatedAt": timestamp,
-        "owner": owner
+        "owner": owner,
+        "timeframes": json.dumps(section_data['timeframes'])  # 타임스탬프 정보 저장
     }
     
     shorts.put_item(Item=highlight)
     
-    payload = {
-        "uuid": uuid,
-        "index": str(index),
-        "question": topic
-    }
-    
-    return payload
+    return section_data
 
-def extract_and_process_section(topic, topics, script, modelID):
-       
+def extract_and_process_section(topic, topics, timestamped_script, modelID):
+    # 타임스탬프가 포함된 스크립트를 문자열로 변환
+    script_with_timestamps = json.dumps(timestamped_script)
+    
+    # 일반 스크립트 추출 (Bedrock에 전달할 때 참조용)
+    plain_script = ' '.join([item['text'] for item in timestamped_script])
+    
+#     prompt = f"""
+# INPUT FORMAT:
+# Original video script with timestamps: <timestamped_script> {script_with_timestamps} </timestamped_script>
+# Plain script for reference: <plain_script> {plain_script} </plain_script>
+# Available topics: <agendas> {topics} </agendas>
+# Target topic: <Topic> {topic} </Topic>
+
+# TASK:
+# Extract sentences from the script that best represent the target topic, suitable for a short-form video clip.
+# Include the corresponding timestamps for each extracted segment.
+
+# CONSTRAINTS:
+# 1. Length: Select content that would take 10-50 seconds to speak (approximately 20-100 words)
+# 2. Relevance: Content must directly relate to the target topic
+# 3. Coherence: Selections must make sense as a standalone clip
+# 4. Uniqueness: Content should not overlap with other topics in <agendas>
+# 5. CRITICAL: Preserve EXACT original text without any modifications - do not change even a single character or word
+# 6. Language: Maintain the original language (English/Korean/Japanese/etc.)
+
+# OUTPUT FORMAT:
+# <thought>
+# - Selection rationale
+# - Coherence verification
+# - Overlap check with other topics
+# - Estimated speaking duration
+# </thought>
+
+# <JSON>
+# {{
+# "VideoTitle": "Clear, engaging title (max 8 words)",
+# "text": "Selected content with [...] indicating cuts",
+# "timeframes": [
+#   {{
+#     "text": "First segment text",
+#     "start_time": start_time_in_seconds,
+#     "end_time": end_time_in_seconds
+#   }},
+#   {{
+#     "text": "Second segment text",
+#     "start_time": start_time_in_seconds,
+#     "end_time": end_time_in_seconds
+#   }}
+# ]
+# }}
+# </JSON>
+
+# IMPORTANT:
+# - Always preserve exact wording for timestamp matching
+# - Use [...] only between non-consecutive selections
+# - Don't correct or modify original text
+# - Ensure selections can stand alone without context
+# - Keep natural speech patterns intact
+# - Include accurate start_time and end_time for each segment
+#     \n\nAssistant:
+#     """
+
     prompt = f"""
 INPUT FORMAT:
-Original video script: <script> {script} </script>
+Original video script with timestamps: <timestamped_script> {script_with_timestamps} </timestamped_script>
 Available topics: <agendas> {topics} </agendas>
 Target topic: <Topic> {topic} </Topic>
 
 TASK:
 Extract sentences from the script that best represent the target topic, suitable for a short-form video clip.
+Include the corresponding timestamps for each extracted segment.
 
 CONSTRAINTS:
 1. Length: Select content that would take 10-50 seconds to speak (approximately 20-100 words)
@@ -88,15 +209,31 @@ OUTPUT FORMAT:
 <JSON>
 {{
 "VideoTitle": "Clear, engaging title (max 8 words)",
-"text": "Selected content with [...] indicating cuts"
+"text": "Selected content with [...] indicating cuts",
+"timeframes": [
+  {{
+    "text": "First segment text",
+    "start_time": start_time_in_seconds,
+    "end_time": end_time_in_seconds
+  }},
+  {{
+    "text": "Second segment text",
+    "start_time": start_time_in_seconds,
+    "end_time": end_time_in_seconds
+  }}
+]
 }}
 </JSON>
 
 EXAMPLES:
-Example 1 (English):
-<script>
-The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods. The most famous Egyptian pyramids are those found at Giza, on the outskirts of Cairo. Several of the Giza pyramids are counted among the largest structures ever built. The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs and their consorts during the Old and Middle Kingdom periods.
-</script>
+Example 1 (English with Timestamps):
+<timestamped_script>
+[{"text": "The pyramids of Egypt are ancient monumental structures.", "start_time": 0.0, "end_time": 3.5}, 
+{"text": "Most were built during the Old and Middle Kingdom periods.", "start_time": 3.6, "end_time": 7.2},
+{"text": "The Pyramid of Khufu is the largest Egyptian pyramid.", "start_time": 15.3, "end_time": 18.9},
+{"text": "It is the only one to remain largely intact.", "start_time": 19.0, "end_time": 22.1},
+{"text": "Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.", "start_time": 22.2, "end_time": 27.8}]
+</timestamped_script>
 <Topic>Egyptian Pyramids</Topic>
 <thought>
 - Selected key information about pyramids' origin and significance
@@ -107,43 +244,19 @@ The pyramids of Egypt are ancient monumental structures. Most were built during 
 <JSON>
 {{
 "VideoTitle": "The Magnificent Pyramids of Ancient Egypt",
-"text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods. [...] The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs and their consorts during the Old and Middle Kingdom periods."
-}}
-</JSON>
-
-Example 2 (Korean):
-<script>
-김치는 한국의 대표적인 발효 음식입니다. 주로 배추와 무를 사용하며, 고춧가루, 마늘, 생강 등의 양념을 넣어 만듭니다. 김치는 비타민과 미네랄이 풍부하며, 유산균도 많이 함유되어 있습니다. 지역과 계절에 따라 다양한 종류의 김치가 있습니다. 김치는 이제 세계적으로 인정받는 건강식품이 되었습니다.
-</script>
-<Topic>김치의 특징과 영양</Topic>
-<thought>
-- Selected content focusing on kimchi's characteristics and nutrition
-- Creates complete narrative about kimchi's health benefits
-- Avoids overlap with regional varieties topic
-- Estimated duration: 20 seconds (40 words)
-</thought>
-<JSON>
-{{
-"VideoTitle": "김치: 한국의 전통 발효 음식",
-"text": "김치는 한국의 대표적인 발효 음식입니다. 주로 배추와 무를 사용하며, 고춧가루, 마늘, 생강 등의 양념을 넣어 만듭니다. 김치는 비타민과 미네랄이 풍부하며, 유산균도 많이 함유되어 있습니다. [...] 김치는 이제 세계적으로 인정받는 건강식품이 되었습니다."
-}}
-</JSON>
-
-Example 3 (English):
-<script>
-Photosynthesis is a process used by plants and other organisms to convert light energy into chemical energy. This chemical energy is stored in carbohydrate molecules, such as sugars, which are synthesized from carbon dioxide and water. Oxygen is released as a byproduct. This process is crucial for life on Earth as it provides the oxygen we breath and the food we eat. Photosynthesis occurs in the chloroplasts, specifically using chlorophyll, the green pigment involved in photosynthesis. The process has two stages: light-dependent reactions and light-independent reactions, also known as the Calvin cycle.
-</script>
-<Topic>Process of Photosynthesis</Topic>
-<thought>
-- Selected core explanation of photosynthesis process
-- Maintains scientific accuracy while being accessible
-- Avoids overlap with cellular structure topics
-- Estimated duration: 35 seconds (70 words)
-</thought>
-<JSON>
-{{
-"VideoTitle": "Photosynthesis: Nature's Way of Harnessing Light",
-"text": "Photosynthesis is a process used by plants and other organisms to convert light energy into chemical energy. This chemical energy is stored in carbohydrate molecules, such as sugars, which are synthesized from carbon dioxide and water. Oxygen is released as a byproduct. [...] Photosynthesis occurs in the chloroplasts, specifically using chlorophyll, the green pigment involved in photosynthesis. The process has two stages: light-dependent reactions and light-independent reactions, also known as the Calvin cycle."
+"text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods. [...] The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
+"timeframes": [
+  {{
+    "text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods.",
+    "start_time": 0.0,
+    "end_time": 7.2
+  }},
+  {{
+    "text": "The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
+    "start_time": 15.3,
+    "end_time": 27.8
+  }}
+]
 }}
 </JSON>
 
@@ -153,8 +266,10 @@ IMPORTANT:
 - Don't correct or modify original text
 - Ensure selections can stand alone without context
 - Keep natural speech patterns intact
+- Include accurate start_time and end_time for each segment
     \n\nAssistant:
     """
+
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
@@ -164,11 +279,10 @@ IMPORTANT:
         "top_p": 0
     })
 
-    # 지수 백오프 재시도 로직 추가
-    max_retries = 10  # 최대 재시도 횟수
-    max_backoff = 16  # 최대 대기 시간
+    # 지수 백오프 재시도 로직
+    max_retries = 10
+    max_backoff = 16
     retry_count = 0
-
 
     while True:
         try:
@@ -183,19 +297,20 @@ IMPORTANT:
             
             chunk = json.loads(response_text[firstIndex:endIndex+1])
             
-            return chunk['text']
+            # 타임스탬프 정보가 포함된 결과 반환
+            return {
+                'text': chunk['text'],
+                'timeframes': chunk.get('timeframes', []),
+                'VideoTitle': chunk.get('VideoTitle', '')
+            }
             
         except ClientError as e:
-            # ThrottlingException 처리
             if e.response['Error']['Code'] == 'ThrottlingException' and retry_count < max_retries:
                 retry_count += 1
-                # 지수 백오프 계산 (1초, 2초, 4초, 8초, ...)
                 backoff_time = min(2 ** (retry_count - 1), max_backoff)
-
                 sleep_time = backoff_time                
                 print(f"ThrottlingException 발생. {sleep_time:.2f}초 후 재시도 ({retry_count}/{max_retries})...")
                 time.sleep(sleep_time)
             else:
-                # 최대 재시도 횟수 초과 또는 다른 오류인 경우
                 print(f"오류 발생: {str(e)}")
                 raise
