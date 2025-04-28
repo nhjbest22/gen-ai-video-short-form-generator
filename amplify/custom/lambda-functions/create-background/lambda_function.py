@@ -52,21 +52,30 @@ def lambda_handler(event, context):
     vertical = event['inputs'][0]['Vertical']
     
     image_width = 1080
-    
+        
     if vertical:
         source_key = 'assets/shorts-background-vertical.png'
-        title_height = 240
         image_height = 1920
-        initial_text_size = 60  # Start with larger size and scale down if needed
+        initial_text_size = 60
+
+        title_y_start = 175  # 제목 시작 Y좌표
+        title_y_end = 275    # 제목 끝 Y좌표
+
     else:
         source_key = 'assets/shorts-background-1x1.png'
-        title_height = 420
         image_height = 1920
         initial_text_size = 84
+
+        title_y_start = 200  # 제목 시작 Y좌표
+        title_y_end = 300    # 제목 끝 Y좌표
+
+
+    title_height = title_y_end - title_y_start  # 제목 영역 높이
+
     
     destination_dir = f'videos/{uuid}/background'
     
-    # Load and resize base image
+    # 기존 코드와 동일: 이미지 로드 및 준비
     response_image = s3.get_object(Bucket=bucket_name, Key=source_key)['Body'].read()
     base_image = Image.open(BytesIO(response_image))
     
@@ -75,18 +84,18 @@ def lambda_handler(event, context):
     
     draw = ImageDraw.Draw(base_image)
     
-    # Text configuration
+    # 텍스트 구성 설정
     font_path = './NotoSansKR-SemiBold.ttf'
-    padding_x = 40  # Increased padding for better text layout
-    padding_y = 20  # Small padding to prevent text from touching edges
+    padding_x = 40
+    padding_y = 10  # 패딩을 줄여서 제한된 영역에 더 많은 텍스트 공간 확보
     
     available_width = image_width - (2 * padding_x)
-    available_height = title_height - (2 * padding_y)
-    line_spacing = 8  # Slightly increased for better readability
+    available_height = title_height - (2 * padding_y)  # 이제 이 높이는 90px (340-250-2*10)
+    line_spacing = 8
     
-    # Find appropriate font size that maintains proportion
+    # 폰트 크기 찾기 로직은 동일하게 유지
     text_size = initial_text_size
-    min_text_size = 40  # Increased minimum size for better readability
+    min_text_size = 40
     
     while text_size >= min_text_size:
         font = load_font(font_path, text_size)
@@ -95,11 +104,11 @@ def lambda_handler(event, context):
             
         lines = wrap_text(question, available_width, font)
         
-        if len(lines) > 2:
+        if len(lines) > 2:  # 최대 2줄로 제한
             text_size -= 2
             continue
             
-        # Calculate total height including line spacing
+        # 총 높이 계산
         total_height = 0
         for line in lines:
             _, height = get_text_dimensions(line, font)
@@ -108,13 +117,13 @@ def lambda_handler(event, context):
         if len(lines) > 1:
             total_height += line_spacing * (len(lines) - 1)
             
-        # Check if text fits in available height while maintaining proportion
+        # 제한된 높이에 맞는지 확인
         if total_height <= available_height:
             break
             
         text_size -= 2
     
-    # Calculate vertical centering within title area
+    # 제한된 영역 내에서 세로 중앙 정렬 계산
     total_height = 0
     line_heights = []
     for line in lines:
@@ -125,20 +134,20 @@ def lambda_handler(event, context):
     if len(lines) > 1:
         total_height += line_spacing * (len(lines) - 1)
         
-    # Center text vertically in title area
-    current_y = padding_y + (available_height - total_height) / 2
+    # 중요 변경: 시작 Y좌표를 title_y_start 기준으로 계산
+    current_y = title_y_start + padding_y + (available_height - total_height) / 2
     
-    # Draw text
-    white = (255, 255, 255)
+    # 텍스트 그리기
+    black = (0, 0, 0)
     
     for i, line in enumerate(lines):
         width, _ = get_text_dimensions(line, font)
         text_x = (image_width - width) / 2
         
-        draw.text((text_x, current_y), line, font=font, fill=white)
+        draw.text((text_x, current_y), line, font=font, fill=black)
         current_y += line_heights[i] + line_spacing
     
-    # Save and upload
+    # 저장 및 업로드 코드는 동일하게 유지
     buffer = BytesIO()
     base_image.save(buffer, format='png')
     buffer.seek(0)
