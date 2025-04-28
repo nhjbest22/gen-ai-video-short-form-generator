@@ -55,7 +55,7 @@ def create_new_video(uuid, index, bucket_name, sections, vertical):
                 "Height": 1440 if vertical else 1080,
                 "Width": 1080,
                 "X": 0,
-                "Y": 240 if vertical else 420
+                "Y": 340 if vertical else 420
             },
             "AudioSelectors": {
                 "Audio Selector 1": {
@@ -153,7 +153,7 @@ def create_new_video(uuid, index, bucket_name, sections, vertical):
                                     'FontScript': 'AUTOMATIC',
                                     'FontSize': 36,
                                     'TeletextSpacing': 'PROPORTIONAL',
-                                    'YPosition': 1700 if vertical else 1550
+                                    'YPosition': 1800 if vertical else 1550
                                 }
                             },
                             "LanguageCode": 'KOR'
