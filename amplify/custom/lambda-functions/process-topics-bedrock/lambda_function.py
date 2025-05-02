@@ -51,10 +51,12 @@ def get_transcript_from_s3(bucket_name, uuid):
 def create_timestamped_script(transcript_json):
     """타임스탬프가 포함된 스크립트 생성"""
     items = transcript_json['results']['items']
+    
     timestamped_script = []
     
     current_sentence = []
     sentence_start_time = None
+    last_end_time = None
     
     for item in items:
         if item['type'] == 'pronunciation':
@@ -66,22 +68,24 @@ def create_timestamped_script(transcript_json):
                 sentence_start_time = start_time
             
             current_sentence.append(word)
+            last_end_time = end_time
             
-            # 문장 끝 감지 (마침표, 물음표, 느낌표 등으로 끝나는 경우)
-            if word.endswith('.') or word.endswith('?') or word.endswith('!'):
+        # 구두점 처리
+        elif item['type'] == 'punctuation':
+            punctuation = item['alternatives'][0]['content']
+            if current_sentence:
+                current_sentence[-1] += punctuation
+            
+            # 문장 종결 구두점인 경우 문장 완성
+            if punctuation in ['.', '?', '!']:
                 sentence_text = ' '.join(current_sentence)
                 timestamped_script.append({
                     'text': sentence_text,
                     'start_time': sentence_start_time,
-                    'end_time': end_time
+                    'end_time': last_end_time
                 })
                 current_sentence = []
                 sentence_start_time = None
-        
-        # 구두점 처리
-        elif item['type'] == 'punctuation':
-            if current_sentence:
-                current_sentence[-1] += item['alternatives'][0]['content']
     
     # 남은 문장 처리
     if current_sentence and sentence_start_time is not None:
@@ -89,7 +93,170 @@ def create_timestamped_script(transcript_json):
         timestamped_script.append({
             'text': sentence_text,
             'start_time': sentence_start_time,
-            'end_time': items[-1]['end_time'] if 'end_time' in items[-1] else None
+            'end_time': last_end_time
+        })
+    
+    return timestamped_script
+    
+def process_topic(topic, topics, timestamped_script, uuid, modelID, owner, index):
+    shorts = dynamodb.Table(os.environ["HIGHLIGHT_TABLE_NAME"])
+    
+    # 타임스탬프가 포함된 스크립트로 섹션 추출 및 처리
+    section_data = extract_and_process_section(topic, topics, timestamped_script, modelID)
+    
+    timestamp = datetime.datetime.now(datetime.UTC).isoformat()[:-6]+"Z"
+    
+    highlight = {
+        "Text": section_data['text'],
+        "Question": topic,
+        "Index": str(index),
+        "VideoName": uuid,
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+        "owner": owner,
+        "timeframes": json.dumps(section_data['timeframes'])  # 타임스탬프 정보 저장
+    }
+    
+    shorts.put_item(Item=highlight)
+    
+    return section_data
+
+def extract_and_process_section(topic, topics, timestamped_script, modelID):
+    # 타임스탬프가 포함된 스크립트를 문자열로 변환
+    script_with_timestamps = json.dumps(timestamped_script)
+
+    prompt = f"""
+INPUT:
+- Script with timestamps: <timestamped_script> {script_with_timestamps} </timestamped_script>
+- All topics: <agendas> {topics} </agendas>
+- Target topic: <Topic> {topic} </Topic>
+
+TASK:
+Extract sentences from the script that best represent the target topic for a short-form video clip (10-50 seconds, ~20-100 words).
+
+REQUIREMENTS:
+- Content must directly relate to the target topic
+- Selections must make sense as a standalone clip
+- Avoid overlap with other topics in <agendas>
+- Preserve exact original text and language
+- Include accurate timestamps for each segment
+
+OUTPUT:
+<thought>
+Brief explanation of your selection rationale
+</thought>
+
+<JSON>
+{{
+"VideoTitle": "Clear, engaging title (max 8 words)",
+"text": "Selected content with [...] indicating cuts",
+"timeframes": [
+  {{
+    "text": "Segment text",
+    "start_time": start_time_in_seconds,
+    "end_time": end_time_in_seconds
+  }}
+]
+}}
+</JSON>
+
+IMPORTANT:
+- Preserve exact wording for timestamp matching
+- Use [...] only between non-consecutive selections
+- Include accurate start_time and end_time for each segment
+    """
+
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        "temperature": 0,
+        "top_p": 0
+    })
+
+    # 지수 백오프 재시도 로직
+    max_retries = 10
+    max_backoff = 16
+    retry_count = 0
+
+    while True:
+        try:
+            response = bedrock.invoke_model(body=body, accept='*/*', contentType='application/json', modelId=modelID)
+            response_body = json.loads(response['body'].read())
+            response_text = response_body['content'][0]['text']
+            
+            print(response_text)
+            
+            firstIndex = int(response_text.find('{'))
+            endIndex = int(response_text.rfind('}'))
+            
+            chunk = json.loads(response_text[firstIndex:endIndex+1])
+            print("result: ", chunk)
+            
+            # 타임스탬프 정보가 포함된 결과 반환
+            return {
+                'text': chunk['text'],
+                'timeframes': chunk.get('timeframes', []),
+                'VideoTitle': chunk.get('VideoTitle', '')
+            }
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ThrottlingException' and retry_count < max_retries:
+                retry_count += 1
+                backoff_time = min(2 ** (retry_count - 1), max_backoff)
+                sleep_time = backoff_time                
+                print(f"ThrottlingException 발생. {sleep_time:.2f}초 후 재시도 ({retry_count}/{max_retries})...")
+                time.sleep(sleep_time)
+            else:
+                print(f"오류 발생: {str(e)}")
+                raise
+
+def create_timestamped_script(transcript_json):
+    """타임스탬프가 포함된 스크립트 생성"""
+    items = transcript_json['results']['items']
+    
+    timestamped_script = []
+    
+    current_sentence = []
+    sentence_start_time = None
+    last_end_time = None
+    
+    for item in items:
+        if item['type'] == 'pronunciation':
+            word = item['alternatives'][0]['content']
+            start_time = float(item['start_time'])
+            end_time = float(item['end_time'])
+            
+            if sentence_start_time is None:
+                sentence_start_time = start_time
+            
+            current_sentence.append(word)
+            last_end_time = end_time
+            
+        # 구두점 처리
+        elif item['type'] == 'punctuation':
+            punctuation = item['alternatives'][0]['content']
+            if current_sentence:
+                current_sentence[-1] += punctuation
+            
+            # 문장 종결 구두점인 경우 문장 완성
+            if punctuation in ['.', '?', '!']:
+                sentence_text = ' '.join(current_sentence)
+                timestamped_script.append({
+                    'text': sentence_text,
+                    'start_time': sentence_start_time,
+                    'end_time': last_end_time
+                })
+                current_sentence = []
+                sentence_start_time = None
+    
+    # 남은 문장 처리
+    if current_sentence and sentence_start_time is not None:
+        sentence_text = ' '.join(current_sentence)
+        timestamped_script.append({
+            'text': sentence_text,
+            'start_time': sentence_start_time,
+            'end_time': last_end_time
         })
     
     return timestamped_script
@@ -124,61 +291,33 @@ def extract_and_process_section(topic, topics, timestamped_script, modelID):
     # 일반 스크립트 추출 (Bedrock에 전달할 때 참조용)
     plain_script = ' '.join([item['text'] for item in timestamped_script])
     
-#     prompt = f"""
-# INPUT FORMAT:
-# Original video script with timestamps: <timestamped_script> {script_with_timestamps} </timestamped_script>
-# Plain script for reference: <plain_script> {plain_script} </plain_script>
-# Available topics: <agendas> {topics} </agendas>
-# Target topic: <Topic> {topic} </Topic>
+    # 중괄호를 이스케이프하기 위해 {{ 및 }}를 사용하거나, 별도의 문자열 변수로 분리
+    example_json = '''
+{
+"VideoTitle": "The Magnificent Pyramids of Ancient Egypt",
+"text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods. [...] The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
+"timeframes": [
+  {
+    "text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods.",
+    "start_time": 0.0,
+    "end_time": 7.2
+  },
+  {
+    "text": "The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
+    "start_time": 15.3,
+    "end_time": 27.8
+  }
+]
+}
+'''
 
-# TASK:
-# Extract sentences from the script that best represent the target topic, suitable for a short-form video clip.
-# Include the corresponding timestamps for each extracted segment.
-
-# CONSTRAINTS:
-# 1. Length: Select content that would take 10-50 seconds to speak (approximately 20-100 words)
-# 2. Relevance: Content must directly relate to the target topic
-# 3. Coherence: Selections must make sense as a standalone clip
-# 4. Uniqueness: Content should not overlap with other topics in <agendas>
-# 5. CRITICAL: Preserve EXACT original text without any modifications - do not change even a single character or word
-# 6. Language: Maintain the original language (English/Korean/Japanese/etc.)
-
-# OUTPUT FORMAT:
-# <thought>
-# - Selection rationale
-# - Coherence verification
-# - Overlap check with other topics
-# - Estimated speaking duration
-# </thought>
-
-# <JSON>
-# {{
-# "VideoTitle": "Clear, engaging title (max 8 words)",
-# "text": "Selected content with [...] indicating cuts",
-# "timeframes": [
-#   {{
-#     "text": "First segment text",
-#     "start_time": start_time_in_seconds,
-#     "end_time": end_time_in_seconds
-#   }},
-#   {{
-#     "text": "Second segment text",
-#     "start_time": start_time_in_seconds,
-#     "end_time": end_time_in_seconds
-#   }}
-# ]
-# }}
-# </JSON>
-
-# IMPORTANT:
-# - Always preserve exact wording for timestamp matching
-# - Use [...] only between non-consecutive selections
-# - Don't correct or modify original text
-# - Ensure selections can stand alone without context
-# - Keep natural speech patterns intact
-# - Include accurate start_time and end_time for each segment
-#     \n\nAssistant:
-#     """
+    example_timestamped_script = '''
+[{"text": "The pyramids of Egypt are ancient monumental structures.", "start_time": 0.0, "end_time": 3.5}, 
+{"text": "Most were built during the Old and Middle Kingdom periods.", "start_time": 3.6, "end_time": 7.2},
+{"text": "The Pyramid of Khufu is the largest Egyptian pyramid.", "start_time": 15.3, "end_time": 18.9},
+{"text": "It is the only one to remain largely intact.", "start_time": 19.0, "end_time": 22.1},
+{"text": "Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.", "start_time": 22.2, "end_time": 27.8}]
+'''
 
     prompt = f"""
 INPUT FORMAT:
@@ -228,11 +367,7 @@ OUTPUT FORMAT:
 EXAMPLES:
 Example 1 (English with Timestamps):
 <timestamped_script>
-[{"text": "The pyramids of Egypt are ancient monumental structures.", "start_time": 0.0, "end_time": 3.5}, 
-{"text": "Most were built during the Old and Middle Kingdom periods.", "start_time": 3.6, "end_time": 7.2},
-{"text": "The Pyramid of Khufu is the largest Egyptian pyramid.", "start_time": 15.3, "end_time": 18.9},
-{"text": "It is the only one to remain largely intact.", "start_time": 19.0, "end_time": 22.1},
-{"text": "Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.", "start_time": 22.2, "end_time": 27.8}]
+{example_timestamped_script}
 </timestamped_script>
 <Topic>Egyptian Pyramids</Topic>
 <thought>
@@ -242,22 +377,7 @@ Example 1 (English with Timestamps):
 - Estimated duration: 25 seconds (50 words)
 </thought>
 <JSON>
-{{
-"VideoTitle": "The Magnificent Pyramids of Ancient Egypt",
-"text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods. [...] The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
-"timeframes": [
-  {{
-    "text": "The pyramids of Egypt are ancient monumental structures. Most were built during the Old and Middle Kingdom periods.",
-    "start_time": 0.0,
-    "end_time": 7.2
-  }},
-  {{
-    "text": "The Pyramid of Khufu is the largest Egyptian pyramid. It is the only one to remain largely intact. Egyptologists believe that the pyramids were built as tombs for the country's pharaohs.",
-    "start_time": 15.3,
-    "end_time": 27.8
-  }}
-]
-}}
+{example_json}
 </JSON>
 
 IMPORTANT:
