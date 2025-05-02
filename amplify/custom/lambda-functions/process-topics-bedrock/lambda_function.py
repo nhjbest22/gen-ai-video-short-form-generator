@@ -141,6 +141,27 @@ REQUIREMENTS:
 - Preserve exact original text and language
 - Include accurate timestamps for each segment
 
+EXAMPLE:
+Original script segment:
+[
+  {{"text": "전기차 시대의 또 다른 승리자.", "start_time": 7.9, "end_time": 9.779}},
+  {{"text": "전기차 시대에 어떤 승리자가 있을 것이냐.", "start_time": 10.26, "end_time": 12.449}}
+]
+
+Correct extraction:
+{{
+  "text": "전기차 시대의 또 다른 승리자. 전기차 시대에 어떤 승리자가 있을 것이냐.",
+  "timeframes": [
+    {{
+      "text": "전기차 시대의 또 다른 승리자. 전기차 시대에 어떤 승리자가 있을 것이냐.",
+      "start_time": 7.9,
+      "end_time": 12.449
+    }}
+  ]
+}}
+
+Note: start_time (7.9) is ALWAYS less than end_time (12.449).
+
 OUTPUT:
 <thought>
 Brief explanation of your selection rationale
@@ -164,7 +185,10 @@ IMPORTANT:
 - Preserve exact wording for timestamp matching
 - Use [...] only between non-consecutive selections
 - Include accurate start_time and end_time for each segment
-    """
+- Double check that ALL start_time values are LESS THAN their corresponding end_time values
+- Only use timestamps that exist in the original script
+- When combining consecutive segments, use the start_time of the first segment and end_time of the last segment
+"""
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
