@@ -21,7 +21,7 @@ def convert_seconds_to_timecode(seconds):
     seconds = float(seconds)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
-    frames = int((seconds - int(seconds)) * 24)  # 24 fps 가정
+    frames = int((seconds - int(seconds)) * 30)  # 30 fps 가정
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(int(hours), int(minutes), int(seconds), frames)
 
 def lambda_handler(event, context):
