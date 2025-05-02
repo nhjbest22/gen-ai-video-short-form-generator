@@ -29,7 +29,7 @@ export const modelOptions: ModelOption[] = [
   {
     name: "Claude 3.7 Sonnet",
     logo: "logos/anthropic-logo.png",
-    modelId: "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
     provider: "Anthropic",
   },
   {
