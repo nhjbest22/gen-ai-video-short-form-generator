@@ -6,7 +6,7 @@ def convert_seconds_to_timecode(seconds):
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     remaining_seconds = int(seconds % 60)
-    frames = int((seconds - int(seconds)) * 24)  # Assuming 24 frames per second, adjust if needed
+    frames = int((seconds - int(seconds)) * 30)  # Assuming 30 frames per second, adjust if needed
 
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(hours, minutes, remaining_seconds, frames)
     
