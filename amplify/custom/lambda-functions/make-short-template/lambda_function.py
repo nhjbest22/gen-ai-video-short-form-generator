@@ -146,9 +146,9 @@ def create_new_video(uuid, index, bucket_name, sections, vertical):
                                 "DestinationType": 'BURN_IN',
                                 "BurninDestinationSettings": {
                                     'Alignment': 'CENTERED',
-                                    'BackgroundColor': 'BLACK',
+                                    'BackgroundColor': 'None',
                                     'BackgroundOpacity': 80,
-                                    'FontColor': 'WHITE',
+                                    'FontColor': 'BLACK',
                                     'FontOpacity': 255,
                                     'FontScript': 'AUTOMATIC',
                                     'FontSize': 36,
