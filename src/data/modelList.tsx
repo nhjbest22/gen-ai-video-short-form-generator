@@ -26,12 +26,12 @@ export const modelOptions: ModelOption[] = [
     modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
     provider: "Anthropic",
   },
-  {
-    name: "Claude 3.7 Sonnet",
-    logo: "logos/anthropic-logo.png",
-    modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    provider: "Anthropic",
-  },
+  // {
+  //   name: "Claude 3.7 Sonnet",
+  //   logo: "logos/anthropic-logo.png",
+  //   modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  //   provider: "Anthropic",
+  // },
   {
     name: "Claude 3.0 Sonnet",
     logo: "logos/anthropic-logo.png",
