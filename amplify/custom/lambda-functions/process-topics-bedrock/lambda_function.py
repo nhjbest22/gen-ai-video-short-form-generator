@@ -156,10 +156,10 @@ Brief explanation of why these specific sentences best represent the topic
 </thought>
 
 <JSON>
-{
+{{
 "VideoTitle": "Clear, engaging title (max 8 words)",
 "selected_numbers": [x, y, z, ...]  // Array of selected sentence numbers
-}
+}}
 </JSON>
 """
 
