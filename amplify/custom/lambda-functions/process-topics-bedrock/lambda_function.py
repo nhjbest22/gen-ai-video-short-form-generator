@@ -122,73 +122,47 @@ def process_topic(topic, topics, timestamped_script, uuid, modelID, owner, index
     return section_data
 
 def extract_and_process_section(topic, topics, timestamped_script, modelID):
-    # 타임스탬프가 포함된 스크립트를 문자열로 변환
-    script_with_timestamps = json.dumps(timestamped_script)
-
+    # 번호가 매겨진 목록으로 스크립트 전달
+    script_numbered = "\n".join([f"{i+1}. \"{item['text']}\"" for i, item in enumerate(timestamped_script)])
+    
     prompt = f"""
 INPUT:
-- Script with timestamps: <timestamped_script> {script_with_timestamps} </timestamped_script>
+- Numbered script sentences: <script>
+{script_numbered}
+</script>
 - All topics: <agendas> {topics} </agendas>
 - Target topic: <Topic> {topic} </Topic>
 
 TASK:
-Extract sentences from the script that best represent the target topic for a short-form video clip (10-50 seconds, ~20-100 words).
+Select 5-10 sentence numbers from the script that best represent the target topic for a short-form video clip.
 
-REQUIREMENTS:
-- Content must directly relate to the target topic
-- Selections must make sense as a standalone clip
-- Avoid overlap with other topics in <agendas>
-- Preserve exact original text and language
-- Include accurate timestamps for each segment
+CRITICAL REQUIREMENTS:
+- Return ONLY the sentence numbers (e.g., 1, 2, 3)
+- Selected sentences must be coherent when combined
+- Total duration should be 20-80 seconds
+- Sentences must directly relate to the topic
 
-EXAMPLE:
-Original script segment:
-[
-  {{"text": "전기차 시대의 또 다른 승리자.", "start_time": 7.9, "end_time": 9.779}},
-  {{"text": "전기차 시대에 어떤 승리자가 있을 것이냐.", "start_time": 10.26, "end_time": 12.449}}
-]
+EXAMPLE 1 - Consecutive sentences:
+If sentences 15, 16, 17, 18, 19, 20 form a complete thought:
+CORRECT OUTPUT: [15, 16, 17, 18, 19, 20]
 
-Correct extraction:
-{{
-  "text": "전기차 시대의 또 다른 승리자. 전기차 시대에 어떤 승리자가 있을 것이냐.",
-  "timeframes": [
-    {{
-      "text": "전기차 시대의 또 다른 승리자. 전기차 시대에 어떤 승리자가 있을 것이냐.",
-      "start_time": 7.9,
-      "end_time": 12.449
-    }}
-  ]
-}}
-
-Note: start_time (7.9) is ALWAYS less than end_time (12.449).
+EXAMPLE 2 - Non-consecutive sentences:
+If the best sentences are 23, 24, 28, 29, 35, 36:
+CORRECT OUTPUT: [23, 24, 28, 29, 35, 36]
 
 OUTPUT:
 <thought>
-Brief explanation of your selection rationale
+Brief explanation of why these specific sentences best represent the topic
 </thought>
 
 <JSON>
-{{
+{
 "VideoTitle": "Clear, engaging title (max 8 words)",
-"text": "Selected content with [...] indicating cuts",
-"timeframes": [
-  {{
-    "text": "Segment text",
-    "start_time": start_time_in_seconds,
-    "end_time": end_time_in_seconds
-  }}
-]
-}}
+"selected_numbers": [x, y, z, ...]  // Array of selected sentence numbers
+}
 </JSON>
-
-IMPORTANT:
-- Preserve exact wording for timestamp matching
-- Use [...] only between non-consecutive selections
-- Include accurate start_time and end_time for each segment
-- Double check that ALL start_time values are LESS THAN their corresponding end_time values
-- Only use timestamps that exist in the original script
-- When combining consecutive segments, use the start_time of the first segment and end_time of the last segment
 """
+
 
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
@@ -209,21 +183,102 @@ IMPORTANT:
             response_body = json.loads(response['body'].read())
             response_text = response_body['content'][0]['text']
             
-            print(response_text)
+            print("Bedrock Response:", response_text)
             
             firstIndex = int(response_text.find('{'))
             endIndex = int(response_text.rfind('}'))
             
             chunk = json.loads(response_text[firstIndex:endIndex+1])
-            print("result: ", chunk)
             
-            # 타임스탬프 정보가 포함된 결과 반환
-            return {
-                'text': chunk['text'],
-                'timeframes': chunk.get('timeframes', []),
+            # 안전성 검사: selected_numbers 존재 여부 확인
+            if 'selected_numbers' not in chunk:
+                print("오류: 'selected_numbers'가 응답에 없습니다.")
+                raise ValueError("Invalid response format: missing 'selected_numbers'")
+            
+            # 타입 검사 및 변환
+            raw_numbers = chunk['selected_numbers']
+            valid_numbers = []
+            
+            for num in raw_numbers:
+                try:
+                    # 문자열이면 정수로 변환 시도
+                    if isinstance(num, str):
+                        num = int(num.strip())
+                    else:
+                        # 정수가 아닌 경우 정수로 변환
+                        num = int(num)
+                    
+                    # 유효한 범위인지 확인
+                    if 1 <= num <= len(timestamped_script):
+                        valid_numbers.append(num)
+                    else:
+                        print(f"경고: 인덱스 범위를 벗어난 번호 무시: {num}")
+                except (ValueError, TypeError):
+                    print(f"경고: 숫자로 변환할 수 없는 값 무시: {num}")
+            
+            # 유효한 번호가 없으면 오류 발생
+            if not valid_numbers:
+                print("오류: 유효한 문장 번호가 없습니다.")
+                raise ValueError("No valid sentence numbers found")
+            
+            # 선택된 번호들을 정렬
+            valid_numbers.sort()
+            print(f"유효한 문장 번호: {valid_numbers}")
+            
+            # 선택된 문장들을 결합하여 최종 텍스트 생성
+            text_segments = []
+            timeframes = []
+            current_segment = []
+            current_start = None
+            current_end = None
+            
+            for i, num in enumerate(valid_numbers):
+                idx = num - 1  # 0-based index로 변환
+                sentence = timestamped_script[idx]
+                
+                # 연속된 문장 확인
+                if i > 0 and num != valid_numbers[i-1] + 1:
+                    # 비연속 구간 발견 - 현재까지의 세그먼트 저장
+                    if current_segment:
+                        text_segments.append(" ".join(current_segment))
+                        timeframes.append({
+                            "text": " ".join(current_segment),
+                            "start_time": current_start,
+                            "end_time": current_end
+                        })
+                        current_segment = []
+                        current_start = None
+                        current_end = None
+                
+                current_segment.append(sentence['text'])
+                if current_start is None or sentence['start_time'] < current_start:
+                    current_start = sentence['start_time']
+                if current_end is None or sentence['end_time'] > current_end:
+                    current_end = sentence['end_time']
+            
+            # 마지막 세그먼트 처리
+            if current_segment:
+                text_segments.append(" ".join(current_segment))
+                timeframes.append({
+                    "text": " ".join(current_segment),
+                    "start_time": current_start,
+                    "end_time": current_end
+                })
+            
+            # 최종 텍스트 생성 ([...] 구분자 사용)
+            final_text = " [...] ".join(text_segments)
+            
+            result = {
+                'text': final_text,
+                'timeframes': timeframes,
                 'VideoTitle': chunk.get('VideoTitle', '')
             }
             
+            print("\nFINAL RESULT WITH TIMEFRAMES:")
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            
+            return result
+
         except ClientError as e:
             if e.response['Error']['Code'] == 'ThrottlingException' and retry_count < max_retries:
                 retry_count += 1
