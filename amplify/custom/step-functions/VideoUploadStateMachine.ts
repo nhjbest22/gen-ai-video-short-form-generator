@@ -270,7 +270,7 @@ export class VideoUploadStateMachine extends Construct {
                           MaxBitrate: 5000000,
                           FramerateControl: "SPECIFIED",
                           RateControlMode: "QVBR",
-                          FramerateNumerator: 24,
+                          FramerateNumerator: 30,
                           SceneChangeDetect: "TRANSITION_DETECTION",
                         },
                       },
